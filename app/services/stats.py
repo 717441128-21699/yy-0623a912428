@@ -13,7 +13,7 @@ def get_stat_date_str(dt: Optional[datetime] = None) -> str:
 
 def update_daily_stats(db: Session, channel_code: str, store_code: Optional[str], 
                         is_new: bool, is_duplicate: bool, is_cross_store: bool, 
-                        is_blacklist: bool, is_valid: bool):
+                        is_blacklist: bool, is_valid: bool, is_returning: bool = False):
     stat_date = get_stat_date_str()
     
     query = db.query(DailyStats).filter(
@@ -38,6 +38,7 @@ def update_daily_stats(db: Session, channel_code: str, store_code: Optional[str]
             duplicate_leads=0,
             cross_store_leads=0,
             blacklist_leads=0,
+            returning_leads=0,
             valid_leads=0,
             valid_rate=0.0,
             duplicate_rate=0.0
@@ -55,6 +56,8 @@ def update_daily_stats(db: Session, channel_code: str, store_code: Optional[str]
         stats.blacklist_leads += 1
     if is_valid:
         stats.valid_leads += 1
+    if is_returning:
+        stats.returning_leads += 1
     
     if stats.total_leads > 0:
         stats.valid_rate = round(stats.valid_leads / stats.total_leads * 100, 2)
@@ -72,6 +75,7 @@ def get_channel_stats(db: Session, start_date: Optional[str] = None,
         func.sum(DailyStats.duplicate_leads).label('duplicate_leads'),
         func.sum(DailyStats.new_leads).label('new_leads'),
         func.sum(DailyStats.blacklist_leads).label('blacklist_leads'),
+        func.sum(DailyStats.returning_leads).label('returning_leads'),
     )
     
     if start_date:
@@ -98,6 +102,7 @@ def get_channel_stats(db: Session, start_date: Optional[str] = None,
             "new_leads": row.new_leads or 0,
             "duplicate_leads": dup,
             "blacklist_leads": row.blacklist_leads or 0,
+            "returning_leads": row.returning_leads or 0,
             "valid_rate": round(valid / total * 100, 2) if total > 0 else 0.0,
             "duplicate_rate": round(dup / total * 100, 2) if total > 0 else 0.0,
         })
@@ -193,6 +198,7 @@ def get_daily_trend(db: Session, channel_code: Optional[str] = None,
         func.sum(DailyStats.duplicate_leads).label('duplicate_leads'),
         func.sum(DailyStats.valid_leads).label('valid_leads'),
         func.sum(DailyStats.cross_store_leads).label('cross_store_leads'),
+        func.sum(DailyStats.returning_leads).label('returning_leads'),
     )
     
     if channel_code:
@@ -217,6 +223,7 @@ def get_daily_trend(db: Session, channel_code: Optional[str] = None,
             "duplicate_leads": row.duplicate_leads or 0,
             "valid_leads": row.valid_leads or 0,
             "cross_store_leads": row.cross_store_leads or 0,
+            "returning_leads": row.returning_leads or 0,
             "valid_rate": round((row.valid_leads or 0) / (row.total_leads or 1) * 100, 2),
             "duplicate_rate": round((row.duplicate_leads or 0) / (row.total_leads or 1) * 100, 2),
         }

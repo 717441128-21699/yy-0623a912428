@@ -4,7 +4,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.database import SessionLocal, engine, Base
-from app.models import Channel, Store, Blacklist
+from app.models import Channel, Store, Blacklist, DedupRule
 from app.services.deduplication import hash_phone
 
 
@@ -69,12 +69,61 @@ def init_seed_data():
                 black = Blacklist(
                     black_type="phone",
                     black_value=phone_hash,
+                    phone_plain=phone,
                     reason="骚扰电话/恶意投诉用户"
                 )
                 db.add(black)
                 print(f"  新增黑名单手机号: {phone}")
             else:
                 print(f"  黑名单手机号已存在: {phone}")
+        
+        dedup_rules = [
+            {
+                "rule_name": "标准判重规则",
+                "rule_key": "standard",
+                "phone_weight": 60.0,
+                "wechat_weight": 50.0,
+                "name_weight": 10.0,
+                "city_weight": 5.0,
+                "confirmed_threshold": 80.0,
+                "suspected_threshold": 40.0,
+                "description": "默认标准判重策略，手机号权重最高",
+                "is_active": True
+            },
+            {
+                "rule_name": "宽松判重规则",
+                "rule_key": "loose",
+                "phone_weight": 40.0,
+                "wechat_weight": 30.0,
+                "name_weight": 15.0,
+                "city_weight": 10.0,
+                "confirmed_threshold": 70.0,
+                "suspected_threshold": 30.0,
+                "description": "宽松策略，更容易触发疑似重复，适合试运营期",
+                "is_active": False
+            },
+            {
+                "rule_name": "严格判重规则",
+                "rule_key": "strict",
+                "phone_weight": 70.0,
+                "wechat_weight": 60.0,
+                "name_weight": 5.0,
+                "city_weight": 3.0,
+                "confirmed_threshold": 90.0,
+                "suspected_threshold": 50.0,
+                "description": "严格策略，只拦截高置信度重复，减少误判",
+                "is_active": False
+            },
+        ]
+        
+        for rule_data in dedup_rules:
+            existing = db.query(DedupRule).filter(DedupRule.rule_key == rule_data["rule_key"]).first()
+            if not existing:
+                rule = DedupRule(**rule_data)
+                db.add(rule)
+                print(f"  新增判重规则: {rule_data['rule_key']} - {rule_data['rule_name']}")
+            else:
+                print(f"  判重规则已存在: {rule_data['rule_key']}")
         
         db.commit()
         print("\n种子数据初始化完成！")

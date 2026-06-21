@@ -3,9 +3,19 @@ import uuid
 from datetime import datetime
 from typing import Optional, Tuple, List
 from sqlalchemy.orm import Session
-from app.models import Lead, LeadDuplicate, Blacklist, Channel, Store
+from app.models import Lead, LeadDuplicate, Blacklist, Channel, Store, DedupRule
 from app.config import settings
 from app.schemas import LeadReceiveRequest
+
+
+DEFAULT_RULES = {
+    "phone_weight": 60.0,
+    "wechat_weight": 50.0,
+    "name_weight": 10.0,
+    "city_weight": 5.0,
+    "confirmed_threshold": 80.0,
+    "suspected_threshold": 40.0,
+}
 
 
 class DeduplicationResult:
@@ -19,6 +29,7 @@ class DeduplicationResult:
         self.is_new_customer = True
         self.is_blacklist = False
         self.is_cross_store = False
+        self.is_returning = False
         self.attribution_channel = None
         self.attribution_store = None
         self.attribution_type = "first_touch"
@@ -42,6 +53,20 @@ def generate_lead_id() -> str:
 
 def generate_request_id() -> str:
     return f"REQ{datetime.now().strftime('%Y%m%d%H%M%S')}{uuid.uuid4().hex[:10].upper()}"
+
+
+def get_active_rules(db: Session) -> dict:
+    rule = db.query(DedupRule).filter(DedupRule.is_active == True).first()
+    if rule:
+        return {
+            "phone_weight": rule.phone_weight,
+            "wechat_weight": rule.wechat_weight,
+            "name_weight": rule.name_weight,
+            "city_weight": rule.city_weight,
+            "confirmed_threshold": rule.confirmed_threshold,
+            "suspected_threshold": rule.suspected_threshold,
+        }
+    return DEFAULT_RULES.copy()
 
 
 def check_blacklist(db: Session, phone: Optional[str], wechat_encrypted: Optional[str]) -> Tuple[bool, Optional[str]]:
@@ -69,39 +94,44 @@ def check_blacklist(db: Session, phone: Optional[str], wechat_encrypted: Optiona
 
 def find_matching_leads(db: Session, phone: Optional[str], wechat_encrypted: Optional[str]) -> List[Lead]:
     matches = []
+    seen_ids = set()
     
     if phone:
         phone_hash = hash_phone(phone)
         phone_matches = db.query(Lead).filter(
             Lead.phone_hash == phone_hash
         ).all()
-        matches.extend(phone_matches)
+        for m in phone_matches:
+            if m.lead_id not in seen_ids:
+                matches.append(m)
+                seen_ids.add(m.lead_id)
     
     if wechat_encrypted:
         wechat_matches = db.query(Lead).filter(
             Lead.wechat_encrypted == wechat_encrypted
         ).all()
         for m in wechat_matches:
-            if m not in matches:
+            if m.lead_id not in seen_ids:
                 matches.append(m)
+                seen_ids.add(m.lead_id)
     
     return matches
 
 
-def calculate_match_score(lead: Lead, request: LeadReceiveRequest) -> float:
+def calculate_match_score(lead: Lead, request: LeadReceiveRequest, rules: dict) -> float:
     score = 0.0
     
     if request.phone and lead.phone_hash == hash_phone(request.phone):
-        score += 60.0
+        score += rules.get("phone_weight", 60.0)
     
     if request.wechat_encrypted and lead.wechat_encrypted == request.wechat_encrypted:
-        score += 50.0
+        score += rules.get("wechat_weight", 50.0)
     
     if request.name and lead.name and request.name == lead.name:
-        score += 10.0
+        score += rules.get("name_weight", 10.0)
     
     if request.city and lead.city and request.city == lead.city:
-        score += 5.0
+        score += rules.get("city_weight", 5.0)
     
     return min(score, 100.0)
 
@@ -147,6 +177,7 @@ def check_cross_store(original_store: Optional[str], new_store: Optional[str]) -
 
 def deduplicate_lead(db: Session, request: LeadReceiveRequest) -> Tuple[DeduplicationResult, Optional[Lead]]:
     result = DeduplicationResult()
+    rules = get_active_rules(db)
     
     is_black, black_reason = check_blacklist(db, request.phone, request.wechat_encrypted)
     if is_black:
@@ -172,7 +203,7 @@ def deduplicate_lead(db: Session, request: LeadReceiveRequest) -> Tuple[Deduplic
     best_score = 0.0
     
     for lead in matching_leads:
-        score = calculate_match_score(lead, request)
+        score = calculate_match_score(lead, request, rules)
         if score > best_score:
             best_score = score
             best_match = lead
@@ -194,25 +225,42 @@ def deduplicate_lead(db: Session, request: LeadReceiveRequest) -> Tuple[Deduplic
     is_cross = check_cross_store(best_match.store_code, request.store_code)
     result.is_cross_store = is_cross
     
-    if best_match.lead_status == "allocated":
+    is_returning_customer = (
+        request.is_returning or
+        best_match.is_returning or
+        best_match.lead_status in ("allocated", "reviewed") or
+        (best_match.review_status == "confirmed")
+    )
+    result.is_returning = is_returning_customer
+    
+    confirmed_threshold = rules.get("confirmed_threshold", 80.0)
+    suspected_threshold = rules.get("suspected_threshold", 40.0)
+    
+    if best_match.lead_status == "allocated" and not is_cross:
         result.result_type = "allocated"
         result.result_description = "已分配线索"
         result.suggested_action = "已有跟进人，转交原跟进人或协同处理"
         result.duplicate_reason_code = "ALLOCATED"
         result.duplicate_reason = "该线索已分配给其他人员跟进"
+    elif is_returning_customer and best_score >= rules.get("phone_weight", 60.0):
+        result.result_type = "returning_customer"
+        result.result_description = "老客复询"
+        result.suggested_action = "关联原有客户档案，由原跟进人继续跟进"
+        result.duplicate_reason_code = "RETURNING"
+        result.duplicate_reason = "老客户再次咨询"
     elif is_cross:
         result.result_type = "cross_store_conflict"
         result.result_description = "跨门店重复"
         result.suggested_action = "触发跨店冲突流程，由总部或区域协调归属"
         result.duplicate_reason_code = "CROSS_STORE"
         result.duplicate_reason = f"原归属门店[{best_match.store_code}]与新门店[{request.store_code}]冲突"
-    elif best_score >= 80:
+    elif best_score >= confirmed_threshold:
         result.result_type = "confirmed_duplicate"
         result.result_description = "确认重复"
         result.suggested_action = "合并到原有线索，更新末触信息"
         result.duplicate_reason_code = "CONFIRMED_DUP"
         result.duplicate_reason = "手机号或微信高度匹配"
-    elif best_score >= 40:
+    elif best_score >= suspected_threshold:
         result.result_type = "suspected_duplicate"
         result.result_description = "疑似重复"
         result.suggested_action = "人工复核确认后再处理"
@@ -256,6 +304,7 @@ def create_lead_record(db: Session, request: LeadReceiveRequest, result: Dedupli
         last_lead_time=now,
         total_lead_count=1,
         is_cross_store=result.is_cross_store,
+        is_returning=request.is_returning or result.is_returning,
         remark=request.remark
     )
     
@@ -272,6 +321,9 @@ def update_existing_lead(db: Session, existing_lead: Lead, request: LeadReceiveR
     
     if result.is_cross_store:
         existing_lead.is_cross_store = True
+    
+    if result.is_returning:
+        existing_lead.is_returning = True
     
     if request.intended_project and not existing_lead.intended_project:
         existing_lead.intended_project = request.intended_project

@@ -1,10 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from typing import Optional, List
+from typing import Optional
 
 from app.database import get_db
-from app.schemas import ApiResponse, ChannelCreate, StoreCreate, BlacklistCreate
-from app.models import Channel, Store, Blacklist
+from app.schemas import ApiResponse, ChannelCreate, StoreCreate, BlacklistCreate, DedupRuleCreate, DedupRuleUpdate
+from app.models import Channel, Store, Blacklist, DedupRule
+from app.services.deduplication import hash_phone
 
 router = APIRouter(prefix="/config", tags=["配置管理"])
 
@@ -175,6 +176,7 @@ async def get_blacklist(
             "id": item.id,
             "black_type": item.black_type,
             "black_value": item.black_value,
+            "phone_plain": item.phone_plain,
             "reason": item.reason,
             "is_active": item.is_active,
             "created_at": item.created_at
@@ -197,16 +199,33 @@ async def create_blacklist(
     blacklist_data: BlacklistCreate,
     db: Session = Depends(get_db)
 ):
+    black_type = blacklist_data.black_type
+    black_value = None
+    phone_plain = None
+    
+    if black_type == "phone":
+        if not blacklist_data.phone:
+            raise HTTPException(status_code=400, detail="手机号黑名单必须提供 phone 字段")
+        black_value = hash_phone(blacklist_data.phone)
+        phone_plain = blacklist_data.phone
+    elif black_type == "wechat":
+        if not blacklist_data.wechat_encrypted:
+            raise HTTPException(status_code=400, detail="微信黑名单必须提供 wechat_encrypted 字段")
+        black_value = blacklist_data.wechat_encrypted
+    else:
+        raise HTTPException(status_code=400, detail="black_type 只支持 phone 或 wechat")
+    
     existing = db.query(Blacklist).filter(
-        Blacklist.black_type == blacklist_data.black_type,
-        Blacklist.black_value == blacklist_data.black_value
+        Blacklist.black_type == black_type,
+        Blacklist.black_value == black_value
     ).first()
     if existing:
         raise HTTPException(status_code=400, detail="该黑名单已存在")
     
     black = Blacklist(
-        black_type=blacklist_data.black_type,
-        black_value=blacklist_data.black_value,
+        black_type=black_type,
+        black_value=black_value,
+        phone_plain=phone_plain,
         reason=blacklist_data.reason,
         is_active=True
     )
@@ -218,7 +237,11 @@ async def create_blacklist(
     return ApiResponse(
         code=0,
         message="添加成功",
-        data={"id": black.id}
+        data={
+            "id": black.id,
+            "black_type": black_type,
+            "phone_plain": phone_plain
+        }
     )
 
 
@@ -235,3 +258,151 @@ async def delete_blacklist(
     db.commit()
     
     return ApiResponse(code=0, message="已删除")
+
+
+@router.get("/dedup-rules", response_model=ApiResponse, summary="判重规则列表")
+async def get_dedup_rules(
+    is_active: Optional[bool] = None,
+    db: Session = Depends(get_db)
+):
+    query = db.query(DedupRule)
+    if is_active is not None:
+        query = query.filter(DedupRule.is_active == is_active)
+    
+    rules = query.order_by(DedupRule.id).all()
+    
+    rule_list = []
+    for r in rules:
+        rule_list.append({
+            "id": r.id,
+            "rule_name": r.rule_name,
+            "rule_key": r.rule_key,
+            "phone_weight": r.phone_weight,
+            "wechat_weight": r.wechat_weight,
+            "name_weight": r.name_weight,
+            "city_weight": r.city_weight,
+            "confirmed_threshold": r.confirmed_threshold,
+            "suspected_threshold": r.suspected_threshold,
+            "is_active": r.is_active,
+            "description": r.description,
+            "created_at": r.created_at,
+            "updated_at": r.updated_at
+        })
+    
+    return ApiResponse(
+        code=0,
+        message="success",
+        data={"list": rule_list, "total": len(rule_list)}
+    )
+
+
+@router.post("/dedup-rules", response_model=ApiResponse, summary="新增判重规则")
+async def create_dedup_rule(
+    rule_data: DedupRuleCreate,
+    db: Session = Depends(get_db)
+):
+    existing_key = db.query(DedupRule).filter(DedupRule.rule_key == rule_data.rule_key).first()
+    if existing_key:
+        raise HTTPException(status_code=400, detail="规则编码已存在")
+    
+    existing_name = db.query(DedupRule).filter(DedupRule.rule_name == rule_data.rule_name).first()
+    if existing_name:
+        raise HTTPException(status_code=400, detail="规则名称已存在")
+    
+    if rule_data.suspected_threshold >= rule_data.confirmed_threshold:
+        raise HTTPException(status_code=400, detail="疑似阈值必须小于确认阈值")
+    
+    rule = DedupRule(
+        rule_name=rule_data.rule_name,
+        rule_key=rule_data.rule_key,
+        phone_weight=rule_data.phone_weight,
+        wechat_weight=rule_data.wechat_weight,
+        name_weight=rule_data.name_weight,
+        city_weight=rule_data.city_weight,
+        confirmed_threshold=rule_data.confirmed_threshold,
+        suspected_threshold=rule_data.suspected_threshold,
+        description=rule_data.description,
+        is_active=True
+    )
+    
+    db.add(rule)
+    db.commit()
+    db.refresh(rule)
+    
+    return ApiResponse(
+        code=0,
+        message="创建成功",
+        data={"rule_key": rule.rule_key}
+    )
+
+
+@router.put("/dedup-rules/{rule_key}", response_model=ApiResponse, summary="更新判重规则")
+async def update_dedup_rule(
+    rule_key: str,
+    rule_data: DedupRuleUpdate,
+    db: Session = Depends(get_db)
+):
+    rule = db.query(DedupRule).filter(DedupRule.rule_key == rule_key).first()
+    if not rule:
+        raise HTTPException(status_code=404, detail="判重规则不存在")
+    
+    if rule_data.rule_name is not None:
+        existing_name = db.query(DedupRule).filter(
+            DedupRule.rule_name == rule_data.rule_name,
+            DedupRule.id != rule.id
+        ).first()
+        if existing_name:
+            raise HTTPException(status_code=400, detail="规则名称已存在")
+        rule.rule_name = rule_data.rule_name
+    
+    if rule_data.phone_weight is not None:
+        rule.phone_weight = rule_data.phone_weight
+    if rule_data.wechat_weight is not None:
+        rule.wechat_weight = rule_data.wechat_weight
+    if rule_data.name_weight is not None:
+        rule.name_weight = rule_data.name_weight
+    if rule_data.city_weight is not None:
+        rule.city_weight = rule_data.city_weight
+    
+    if rule_data.confirmed_threshold is not None:
+        rule.confirmed_threshold = rule_data.confirmed_threshold
+    if rule_data.suspected_threshold is not None:
+        rule.suspected_threshold = rule_data.suspected_threshold
+    
+    if rule.suspected_threshold >= rule.confirmed_threshold:
+        raise HTTPException(status_code=400, detail="疑似阈值必须小于确认阈值")
+    
+    if rule_data.description is not None:
+        rule.description = rule_data.description
+    if rule_data.is_active is not None:
+        rule.is_active = rule_data.is_active
+    
+    db.commit()
+    
+    return ApiResponse(
+        code=0,
+        message="更新成功",
+        data={"rule_key": rule.rule_key, "is_active": rule.is_active}
+    )
+
+
+@router.put("/dedup-rules/{rule_key}/activate", response_model=ApiResponse, summary="激活指定判重规则（同时停用其他规则）")
+async def activate_dedup_rule(
+    rule_key: str,
+    db: Session = Depends(get_db)
+):
+    rule = db.query(DedupRule).filter(DedupRule.rule_key == rule_key).first()
+    if not rule:
+        raise HTTPException(status_code=404, detail="判重规则不存在")
+    
+    all_rules = db.query(DedupRule).all()
+    for r in all_rules:
+        r.is_active = (r.rule_key == rule_key)
+    
+    db.commit()
+    
+    return ApiResponse(
+        code=0,
+        message="已激活指定规则",
+        data={"active_rule_key": rule_key}
+    )

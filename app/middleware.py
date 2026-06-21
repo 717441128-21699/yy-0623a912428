@@ -20,10 +20,21 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         client_ip = request.client.host if request.client else None
         user_agent = request.headers.get("user-agent")
         
+        request_body = ""
+        channel_code = None
+        store_code = None
+        
         try:
             body = await request.body()
-            request_body = body.decode("utf-8") if body else ""
-        except:
+            if body:
+                request_body = body.decode("utf-8")
+                try:
+                    body_json = json.loads(request_body)
+                    channel_code = body_json.get("channel_code")
+                    store_code = body_json.get("store_code")
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    pass
+        except Exception:
             request_body = ""
         
         response = await call_next(request)
@@ -34,15 +45,37 @@ class LoggingMiddleware(BaseHTTPMiddleware):
             try:
                 db = SessionLocal()
                 
-                channel_code = None
-                store_code = None
+                summary_parts = []
+                if request_body:
+                    try:
+                        body_json = json.loads(request_body)
+                        if body_json.get("phone"):
+                            summary_parts.append(f"phone:{body_json['phone']}")
+                        if body_json.get("name"):
+                            summary_parts.append(f"name:{body_json['name']}")
+                        if body_json.get("channel_code"):
+                            summary_parts.append(f"channel:{body_json['channel_code']}")
+                        if body_json.get("store_code"):
+                            summary_parts.append(f"store:{body_json['store_code']}")
+                    except (json.JSONDecodeError, UnicodeDecodeError):
+                        pass
                 
-                path = request.url.path
+                query_params = dict(request.query_params)
+                if query_params:
+                    for key in ["channel_code", "store_code", "api_path", "has_error"]:
+                        if key in query_params:
+                            summary_parts.append(f"{key}:{query_params[key]}")
+                
+                request_summary = ", ".join(summary_parts[:5]) if summary_parts else None
+                
+                error_message = None
+                if response.status_code >= 400:
+                    error_message = f"HTTP {response.status_code}"
                 
                 db_log = log_api_call(
                     db=db,
                     request_id=request_id,
-                    api_path=path,
+                    api_path=request.url.path,
                     method=request.method,
                     request_params={
                         "query": dict(request.query_params),
@@ -55,7 +88,9 @@ class LoggingMiddleware(BaseHTTPMiddleware):
                     user_agent=user_agent,
                     channel_code=channel_code,
                     store_code=store_code,
-                    has_error=response.status_code >= 400
+                    has_error=response.status_code >= 400,
+                    error_message=error_message,
+                    request_summary=request_summary
                 )
                 db.commit()
                 db.close()
@@ -70,19 +105,3 @@ def validate_phone(phone: str) -> bool:
     if not phone:
         return False
     return bool(re.match(r'^1[3-9]\d{9}$', phone))
-
-
-def validate_lead_data(data: dict) -> tuple:
-    phone = data.get("phone")
-    wechat = data.get("wechat_encrypted")
-    
-    if not phone and not wechat:
-        return False, "手机号和加密微信不能同时为空"
-    
-    if phone and not validate_phone(phone):
-        return False, "手机号格式不正确"
-    
-    if not data.get("channel_code"):
-        return False, "渠道编码不能为空"
-    
-    return True, None

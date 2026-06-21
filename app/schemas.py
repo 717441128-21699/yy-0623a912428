@@ -16,6 +16,7 @@ class LeadReceiveRequest(BaseModel):
     store_code: Optional[str] = None
     remark: Optional[str] = None
     external_lead_id: Optional[str] = None
+    is_returning: bool = False
 
     @field_validator('phone')
     @classmethod
@@ -50,6 +51,7 @@ class LeadDeduplicateResponse(BaseModel):
     is_new_customer: bool = True
     is_blacklist: bool = False
     is_cross_store: bool = False
+    is_returning: bool = False
     
     attribution_channel: Optional[str] = None
     attribution_store: Optional[str] = None
@@ -85,79 +87,60 @@ class StoreCreate(BaseModel):
 
 
 class BlacklistCreate(BaseModel):
-    black_type: str
-    black_value: str
+    black_type: str = "phone"
+    phone: Optional[str] = None
+    wechat_encrypted: Optional[str] = None
     reason: Optional[str] = None
 
+    @field_validator('phone')
+    @classmethod
+    def validate_phone(cls, v):
+        if v is None:
+            return v
+        v = v.strip()
+        if not v:
+            return None
+        if not re.match(r'^1[3-9]\d{9}$', v):
+            raise ValueError('手机号格式不正确')
+        return v
 
-class LeadQueryParams(BaseModel):
-    channel_code: Optional[str] = None
-    store_code: Optional[str] = None
-    city: Optional[str] = None
-    lead_status: Optional[str] = None
-    start_date: Optional[str] = None
-    end_date: Optional[str] = None
-    page: int = 1
-    page_size: int = 20
+
+class DedupRuleCreate(BaseModel):
+    rule_name: str
+    rule_key: str
+    phone_weight: float = 60.0
+    wechat_weight: float = 50.0
+    name_weight: float = 10.0
+    city_weight: float = 5.0
+    confirmed_threshold: float = 80.0
+    suspected_threshold: float = 40.0
+    description: Optional[str] = None
 
 
-class DuplicateQueryParams(BaseModel):
-    channel_code: Optional[str] = None
-    store_code: Optional[str] = None
-    is_confirmed: Optional[bool] = None
-    is_cross_store: Optional[bool] = None
-    start_date: Optional[str] = None
-    end_date: Optional[str] = None
-    page: int = 1
-    page_size: int = 20
+class DedupRuleUpdate(BaseModel):
+    rule_name: Optional[str] = None
+    phone_weight: Optional[float] = None
+    wechat_weight: Optional[float] = None
+    name_weight: Optional[float] = None
+    city_weight: Optional[float] = None
+    confirmed_threshold: Optional[float] = None
+    suspected_threshold: Optional[float] = None
+    description: Optional[str] = None
+    is_active: Optional[bool] = None
 
 
 class ReviewConfirmRequest(BaseModel):
     duplicate_id: int
-    review_result: str
+    review_result: str = Field(..., description="confirmed/rejected/reassigned")
     review_remark: Optional[str] = None
     reviewer: Optional[str] = None
     final_owner_channel: Optional[str] = None
     final_owner_store: Optional[str] = None
 
-
-class StatsQueryParams(BaseModel):
-    channel_code: Optional[str] = None
-    store_code: Optional[str] = None
-    stat_type: str = "daily"
-    start_date: Optional[str] = None
-    end_date: Optional[str] = None
-
-
-class StatsItem(BaseModel):
-    stat_date: Optional[str] = None
-    channel_code: Optional[str] = None
-    store_code: Optional[str] = None
-    total_leads: int = 0
-    new_leads: int = 0
-    duplicate_leads: int = 0
-    cross_store_leads: int = 0
-    blacklist_leads: int = 0
-    valid_leads: int = 0
-    valid_rate: float = 0.0
-    duplicate_rate: float = 0.0
-
-
-class ChannelStatsItem(BaseModel):
-    channel_code: str
-    channel_name: str
-    total_leads: int = 0
-    valid_leads: int = 0
-    valid_rate: float = 0.0
-    duplicate_rate: float = 0.0
-
-
-class StoreStatsItem(BaseModel):
-    store_code: str
-    store_name: str
-    city: Optional[str] = None
-    total_leads: int = 0
-    duplicate_leads: int = 0
-    cross_store_leads: int = 0
-    duplicate_rate: float = 0.0
-    duplicate_source_channels: List[dict] = []
+    @field_validator('review_result')
+    @classmethod
+    def validate_review_result(cls, v):
+        allowed = {"confirmed", "rejected", "reassigned"}
+        if v not in allowed:
+            raise ValueError(f'review_result 必须是 {allowed} 之一')
+        return v

@@ -39,6 +39,7 @@ class Blacklist(Base):
     id = Column(Integer, primary_key=True, index=True)
     black_type = Column(String(20), nullable=False)
     black_value = Column(String(255), nullable=False)
+    phone_plain = Column(String(20))
     reason = Column(String(255))
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -46,6 +47,27 @@ class Blacklist(Base):
     __table_args__ = (
         Index('idx_blacklist_type_value', 'black_type', 'black_value', unique=True),
     )
+
+
+class DedupRule(Base):
+    __tablename__ = "dedup_rules"
+
+    id = Column(Integer, primary_key=True, index=True)
+    rule_name = Column(String(100), unique=True, index=True, nullable=False)
+    rule_key = Column(String(50), unique=True, index=True, nullable=False)
+
+    phone_weight = Column(Float, default=60.0)
+    wechat_weight = Column(Float, default=50.0)
+    name_weight = Column(Float, default=10.0)
+    city_weight = Column(Float, default=5.0)
+
+    confirmed_threshold = Column(Float, default=80.0)
+    suspected_threshold = Column(Float, default=40.0)
+
+    is_active = Column(Boolean, default=True)
+    description = Column(String(255))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
 
 class Lead(Base):
@@ -80,6 +102,11 @@ class Lead(Base):
     
     total_lead_count = Column(Integer, default=1)
     is_cross_store = Column(Boolean, default=False)
+    is_returning = Column(Boolean, default=False)
+    
+    review_status = Column(String(20), default="pending")
+    reviewed_by = Column(String(50))
+    reviewed_at = Column(DateTime(timezone=True))
     
     remark = Column(Text)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
@@ -106,6 +133,7 @@ class LeadDuplicate(Base):
     confirmed_by = Column(String(50))
     confirmed_at = Column(DateTime(timezone=True))
     confirm_result = Column(String(20))
+    confirm_remark = Column(Text)
     
     is_cross_store = Column(Boolean, default=False)
     original_store = Column(String(50))
@@ -114,6 +142,9 @@ class LeadDuplicate(Base):
     channel_conflict = Column(Boolean, default=False)
     original_channel = Column(String(50))
     duplicate_channel = Column(String(50))
+    
+    final_owner_channel = Column(String(50))
+    final_owner_store = Column(String(50))
     
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
@@ -148,6 +179,7 @@ class ApiLog(Base):
     channel_code = Column(String(50), index=True)
     store_code = Column(String(50), index=True)
     
+    request_summary = Column(String(500))
     request_params = Column(Text)
     response_data = Column(Text)
     
@@ -181,6 +213,7 @@ class DailyStats(Base):
     duplicate_leads = Column(Integer, default=0)
     cross_store_leads = Column(Integer, default=0)
     blacklist_leads = Column(Integer, default=0)
+    returning_leads = Column(Integer, default=0)
     valid_leads = Column(Integer, default=0)
     
     valid_rate = Column(Float, default=0.0)

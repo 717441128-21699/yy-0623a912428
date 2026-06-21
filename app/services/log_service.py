@@ -11,13 +11,15 @@ def log_api_call(db: Session, request_id: str, api_path: str, method: str,
                  process_time_ms: int, client_ip: Optional[str] = None,
                  user_agent: Optional[str] = None, channel_code: Optional[str] = None,
                  store_code: Optional[str] = None, has_error: bool = False,
-                 error_message: Optional[str] = None):
+                 error_message: Optional[str] = None,
+                 request_summary: Optional[str] = None):
     log = ApiLog(
         request_id=request_id,
         api_path=api_path,
         method=method,
         channel_code=channel_code,
         store_code=store_code,
+        request_summary=request_summary,
         request_params=json.dumps(request_params, ensure_ascii=False) if request_params else None,
         response_data=json.dumps(response_data, ensure_ascii=False) if response_data else None,
         status_code=status_code,

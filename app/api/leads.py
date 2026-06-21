@@ -6,7 +6,7 @@ from datetime import datetime
 from app.database import get_db
 from app.schemas import (
     LeadReceiveRequest, LeadDeduplicateResponse, ApiResponse,
-    LeadQueryParams, DuplicateQueryParams, ReviewConfirmRequest
+    ReviewConfirmRequest
 )
 from app.services.deduplication import (
     deduplicate_lead, create_lead_record, update_existing_lead,
@@ -14,7 +14,6 @@ from app.services.deduplication import (
 )
 from app.services.stats import update_daily_stats
 from app.models import Lead, LeadDuplicate, LeadReview
-from app.middleware import validate_lead_data
 
 router = APIRouter(prefix="/leads", tags=["线索管理"])
 
@@ -27,15 +26,15 @@ async def receive_lead(
 ):
     request_id = getattr(request.state, "request_id", generate_request_id())
     
-    is_valid, error_msg = validate_lead_data(lead_data.model_dump())
-    if not is_valid:
-        raise HTTPException(status_code=400, detail=error_msg)
+    if not lead_data.phone and not lead_data.wechat_encrypted:
+        raise HTTPException(status_code=400, detail="手机号和加密微信不能同时为空")
     
     result, existing_lead = deduplicate_lead(db, lead_data)
     
     is_new = result.is_new_customer and not result.is_blacklist
     is_duplicate = not result.is_new_customer and not result.is_blacklist
     is_valid_lead = not result.is_blacklist
+    is_returning = result.is_returning and not result.is_blacklist
     
     if result.is_blacklist:
         new_lead = create_lead_record(db, lead_data, result)
@@ -63,7 +62,8 @@ async def receive_lead(
         is_duplicate=is_duplicate,
         is_cross_store=result.is_cross_store,
         is_blacklist=result.is_blacklist,
-        is_valid=is_valid_lead
+        is_valid=is_valid_lead,
+        is_returning=is_returning
     )
     
     db.commit()
@@ -80,6 +80,7 @@ async def receive_lead(
         is_new_customer=result.is_new_customer,
         is_blacklist=result.is_blacklist,
         is_cross_store=result.is_cross_store,
+        is_returning=result.is_returning,
         attribution_channel=result.attribution_channel,
         attribution_store=result.attribution_store,
         attribution_type=result.attribution_type,
@@ -104,6 +105,7 @@ async def get_lead_list(
     store_code: Optional[str] = None,
     city: Optional[str] = None,
     lead_status: Optional[str] = None,
+    review_status: Optional[str] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     page: int = 1,
@@ -120,6 +122,8 @@ async def get_lead_list(
         query = query.filter(Lead.city == city)
     if lead_status:
         query = query.filter(Lead.lead_status == lead_status)
+    if review_status:
+        query = query.filter(Lead.review_status == review_status)
     if start_date:
         query = query.filter(Lead.created_at >= start_date)
     if end_date:
@@ -145,6 +149,10 @@ async def get_lead_list(
             "attribution_type": lead.attribution_type,
             "total_lead_count": lead.total_lead_count,
             "is_cross_store": lead.is_cross_store,
+            "is_returning": lead.is_returning,
+            "review_status": lead.review_status,
+            "reviewed_by": lead.reviewed_by,
+            "reviewed_at": lead.reviewed_at,
             "created_at": lead.created_at,
             "last_lead_time": lead.last_lead_time
         })
@@ -182,10 +190,31 @@ async def get_lead_detail(lead_id: str, db: Session = Depends(get_db)):
             "duplicate_reason_code": dup.duplicate_reason_code,
             "match_score": dup.match_score,
             "is_confirmed": dup.is_confirmed,
+            "confirm_result": dup.confirm_result,
+            "confirm_remark": dup.confirm_remark,
+            "final_owner_channel": dup.final_owner_channel,
+            "final_owner_store": dup.final_owner_store,
             "is_cross_store": dup.is_cross_store,
             "original_store": dup.original_store,
             "duplicate_store": dup.duplicate_store,
             "created_at": dup.created_at
+        })
+    
+    reviews = db.query(LeadReview).filter(
+        LeadReview.lead_id == lead_id
+    ).order_by(LeadReview.created_at.desc()).all()
+    
+    review_list = []
+    for r in reviews:
+        review_list.append({
+            "id": r.id,
+            "duplicate_id": r.duplicate_id,
+            "reviewer": r.reviewer,
+            "review_result": r.review_result,
+            "review_remark": r.review_remark,
+            "final_owner_channel": r.final_owner_channel,
+            "final_owner_store": r.final_owner_store,
+            "created_at": r.created_at
         })
     
     return ApiResponse(
@@ -212,9 +241,14 @@ async def get_lead_detail(lead_id: str, db: Session = Depends(get_db)):
             "last_lead_time": lead.last_lead_time,
             "total_lead_count": lead.total_lead_count,
             "is_cross_store": lead.is_cross_store,
+            "is_returning": lead.is_returning,
+            "review_status": lead.review_status,
+            "reviewed_by": lead.reviewed_by,
+            "reviewed_at": lead.reviewed_at,
             "remark": lead.remark,
             "created_at": lead.created_at,
-            "duplicates": dup_list
+            "duplicates": dup_list,
+            "reviews": review_list
         }
     )
 
@@ -225,6 +259,7 @@ async def get_duplicate_list(
     store_code: Optional[str] = None,
     is_confirmed: Optional[bool] = None,
     is_cross_store: Optional[bool] = None,
+    confirm_result: Optional[str] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     page: int = 1,
@@ -247,6 +282,8 @@ async def get_duplicate_list(
         query = query.filter(LeadDuplicate.is_confirmed == is_confirmed)
     if is_cross_store is not None:
         query = query.filter(LeadDuplicate.is_cross_store == is_cross_store)
+    if confirm_result:
+        query = query.filter(LeadDuplicate.confirm_result == confirm_result)
     if start_date:
         query = query.filter(LeadDuplicate.created_at >= start_date)
     if end_date:
@@ -270,8 +307,11 @@ async def get_duplicate_list(
             "match_score": dup.match_score,
             "is_confirmed": dup.is_confirmed,
             "confirm_result": dup.confirm_result,
+            "confirm_remark": dup.confirm_remark,
             "confirmed_by": dup.confirmed_by,
             "confirmed_at": dup.confirmed_at,
+            "final_owner_channel": dup.final_owner_channel,
+            "final_owner_store": dup.final_owner_store,
             "is_cross_store": dup.is_cross_store,
             "original_store": dup.original_store,
             "duplicate_store": dup.duplicate_store,
@@ -301,10 +341,51 @@ async def review_duplicate(
     if not dup:
         raise HTTPException(status_code=404, detail="重复记录不存在")
     
+    if dup.is_confirmed:
+        raise HTTPException(status_code=400, detail="该记录已复核，不能重复操作")
+    
     dup.is_confirmed = True
     dup.confirmed_by = review_data.reviewer or "system"
     dup.confirmed_at = datetime.now()
     dup.confirm_result = review_data.review_result
+    dup.confirm_remark = review_data.review_remark
+    
+    lead = db.query(Lead).filter(Lead.lead_id == dup.lead_id).first()
+    
+    if review_data.review_result == "confirmed":
+        if lead:
+            lead.lead_status = "allocated"
+            lead.review_status = "confirmed"
+            lead.reviewed_by = review_data.reviewer or "system"
+            lead.reviewed_at = datetime.now()
+        
+        dup.final_owner_channel = lead.channel_code if lead else dup.original_channel
+        dup.final_owner_store = lead.store_code if lead else dup.original_store
+    
+    elif review_data.review_result == "rejected":
+        if lead:
+            lead.review_status = "rejected"
+            lead.reviewed_by = review_data.reviewer or "system"
+            lead.reviewed_at = datetime.now()
+            lead.lead_status = "new"
+        
+        dup.final_owner_channel = None
+        dup.final_owner_store = None
+    
+    elif review_data.review_result == "reassigned":
+        final_channel = review_data.final_owner_channel or dup.original_channel
+        final_store = review_data.final_owner_store or dup.original_store
+        
+        dup.final_owner_channel = final_channel
+        dup.final_owner_store = final_store
+        
+        if lead:
+            lead.channel_code = final_channel
+            lead.store_code = final_store
+            lead.lead_status = "allocated"
+            lead.review_status = "reassigned"
+            lead.reviewed_by = review_data.reviewer or "system"
+            lead.reviewed_at = datetime.now()
     
     review = LeadReview(
         duplicate_id=dup.id,
@@ -312,24 +393,32 @@ async def review_duplicate(
         reviewer=review_data.reviewer or "system",
         review_result=review_data.review_result,
         review_remark=review_data.review_remark,
-        final_owner_channel=review_data.final_owner_channel,
-        final_owner_store=review_data.final_owner_store
+        final_owner_channel=dup.final_owner_channel,
+        final_owner_store=dup.final_owner_store
     )
     db.add(review)
     
-    if review_data.final_owner_channel or review_data.final_owner_store:
-        lead = db.query(Lead).filter(Lead.lead_id == dup.lead_id).first()
-        if lead:
-            if review_data.final_owner_channel:
-                lead.channel_code = review_data.final_owner_channel
-            if review_data.final_owner_store:
-                lead.store_code = review_data.final_owner_store
-            lead.lead_status = "allocated"
+    related_dups = db.query(LeadDuplicate).filter(
+        LeadDuplicate.lead_id == dup.lead_id,
+        LeadDuplicate.is_confirmed == False,
+        LeadDuplicate.id != dup.id
+    ).all()
+    
+    for related in related_dups:
+        related.final_owner_channel = dup.final_owner_channel
+        related.final_owner_store = dup.final_owner_store
     
     db.commit()
     
     return ApiResponse(
         code=0,
         message="复核成功",
-        data={"duplicate_id": dup.id, "review_result": review_data.review_result}
+        data={
+            "duplicate_id": dup.id,
+            "review_result": review_data.review_result,
+            "final_owner_channel": dup.final_owner_channel,
+            "final_owner_store": dup.final_owner_store,
+            "lead_status": lead.lead_status if lead else None,
+            "review_status": lead.review_status if lead else None
+        }
     )

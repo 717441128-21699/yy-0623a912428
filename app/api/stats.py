@@ -79,6 +79,7 @@ async def get_overview_stats(
     total_dup = sum(s["duplicate_leads"] for s in channel_stats)
     total_new = sum(s["new_leads"] for s in channel_stats)
     total_black = sum(s["blacklist_leads"] for s in channel_stats)
+    total_returning = sum(s["returning_leads"] for s in channel_stats)
     
     return ApiResponse(
         code=0,
@@ -89,9 +90,11 @@ async def get_overview_stats(
             "duplicate_leads": total_dup,
             "new_leads": total_new,
             "blacklist_leads": total_black,
+            "returning_leads": total_returning,
             "valid_rate": round(total_valid / total_leads * 100, 2) if total_leads > 0 else 0.0,
             "duplicate_rate": round(total_dup / total_leads * 100, 2) if total_leads > 0 else 0.0,
             "new_customer_rate": round(total_new / total_leads * 100, 2) if total_leads > 0 else 0.0,
+            "returning_rate": round(total_returning / total_leads * 100, 2) if total_leads > 0 else 0.0,
             "channel_count": len(channel_stats)
         }
     )
@@ -100,6 +103,7 @@ async def get_overview_stats(
 @router.get("/api-logs", response_model=ApiResponse, summary="接口调用日志")
 async def get_api_logs(
     channel_code: Optional[str] = None,
+    store_code: Optional[str] = None,
     api_path: Optional[str] = None,
     has_error: Optional[bool] = None,
     start_date: Optional[str] = None,
@@ -112,6 +116,8 @@ async def get_api_logs(
     
     if channel_code:
         query = query.filter(ApiLog.channel_code == channel_code)
+    if store_code:
+        query = query.filter(ApiLog.store_code == store_code)
     if api_path:
         query = query.filter(ApiLog.api_path.like(f"%{api_path}%"))
     if has_error is not None:
@@ -135,6 +141,8 @@ async def get_api_logs(
             "api_path": log.api_path,
             "method": log.method,
             "channel_code": log.channel_code,
+            "store_code": log.store_code,
+            "request_summary": log.request_summary,
             "status_code": log.status_code,
             "process_time_ms": log.process_time_ms,
             "client_ip": log.client_ip,
