@@ -62,6 +62,12 @@ class LeadDeduplicateResponse(BaseModel):
     original_store: Optional[str] = None
     original_lead_time: Optional[datetime] = None
     
+    original_source_channel: Optional[str] = None
+    original_source_store: Optional[str] = None
+    last_visit_date: Optional[datetime] = None
+    customer_level: Optional[str] = None
+    followup_suggestion: Optional[str] = None
+    
     conflict_duplicate_id: Optional[int] = None
 
 
@@ -144,3 +150,75 @@ class ReviewConfirmRequest(BaseModel):
         if v not in allowed:
             raise ValueError(f'review_result 必须是 {allowed} 之一')
         return v
+
+
+class BatchReviewRequest(BaseModel):
+    duplicate_ids: List[int]
+    review_result: str = Field(..., description="confirmed/rejected/reassigned")
+    review_remark: Optional[str] = None
+    reviewer: Optional[str] = None
+    final_owner_channel: Optional[str] = None
+    final_owner_store: Optional[str] = None
+
+    @field_validator('review_result')
+    @classmethod
+    def validate_review_result(cls, v):
+        allowed = {"confirmed", "rejected", "reassigned"}
+        if v not in allowed:
+            raise ValueError(f'review_result 必须是 {allowed} 之一')
+        return v
+
+    @field_validator('duplicate_ids')
+    @classmethod
+    def validate_duplicate_ids(cls, v):
+        if not v or len(v) == 0:
+            raise ValueError('duplicate_ids 不能为空')
+        return v
+
+
+class DedupRuleTryoutRequest(BaseModel):
+    rule_key: Optional[str] = None
+    custom_rules: Optional[DedupRuleCreate] = None
+    sample_leads: List[LeadReceiveRequest]
+
+
+class CustomerArchiveCreate(BaseModel):
+    phone: Optional[str] = None
+    wechat_encrypted: Optional[str] = None
+    name: Optional[str] = None
+    city: Optional[str] = None
+    original_source_channel: Optional[str] = None
+    original_source_store: Optional[str] = None
+    first_visit_date: Optional[datetime] = None
+    last_visit_date: Optional[datetime] = None
+    total_visit_count: int = 1
+    customer_level: Optional[str] = None
+    suggested_followup: Optional[str] = None
+    remark: Optional[str] = None
+
+    @field_validator('phone')
+    @classmethod
+    def validate_phone(cls, v):
+        if v is None:
+            return v
+        v = v.strip()
+        if not v:
+            return None
+        if not re.match(r'^1[3-9]\d{9}$', v):
+            raise ValueError('手机号格式不正确')
+        return v
+
+
+class CustomerArchiveBatchImport(BaseModel):
+    customers: List[CustomerArchiveCreate]
+    overwrite: bool = False
+
+
+class MarkReturningRequest(BaseModel):
+    is_returning: bool = True
+    operator: Optional[str] = None
+    remark: Optional[str] = None
+    original_source_channel: Optional[str] = None
+    original_source_store: Optional[str] = None
+    last_visit_date: Optional[datetime] = None
+    suggested_followup: Optional[str] = None

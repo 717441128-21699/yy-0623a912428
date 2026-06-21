@@ -53,8 +53,9 @@ class DedupRule(Base):
     __tablename__ = "dedup_rules"
 
     id = Column(Integer, primary_key=True, index=True)
-    rule_name = Column(String(100), unique=True, index=True, nullable=False)
-    rule_key = Column(String(50), unique=True, index=True, nullable=False)
+    rule_name = Column(String(100), nullable=False)
+    rule_key = Column(String(50), index=True, nullable=False)
+    version = Column(Integer, default=1)
 
     phone_weight = Column(Float, default=60.0)
     wechat_weight = Column(Float, default=50.0)
@@ -64,8 +65,40 @@ class DedupRule(Base):
     confirmed_threshold = Column(Float, default=80.0)
     suspected_threshold = Column(Float, default=40.0)
 
-    is_active = Column(Boolean, default=True)
+    status = Column(String(20), default="draft")
+    is_active = Column(Boolean, default=False)
     description = Column(String(255))
+    published_by = Column(String(50))
+    published_at = Column(DateTime(timezone=True))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    __table_args__ = (
+        Index('idx_dedup_rules_key_version', 'rule_key', 'version', unique=True),
+    )
+
+
+class CustomerArchive(Base):
+    __tablename__ = "customer_archives"
+
+    id = Column(Integer, primary_key=True, index=True)
+    phone = Column(String(20))
+    phone_hash = Column(String(64), index=True)
+    wechat_encrypted = Column(String(255), index=True)
+    name = Column(String(100))
+    city = Column(String(50))
+
+    original_source_channel = Column(String(50))
+    original_source_store = Column(String(50))
+    first_visit_date = Column(DateTime(timezone=True))
+    last_visit_date = Column(DateTime(timezone=True))
+    total_visit_count = Column(Integer, default=1)
+
+    customer_level = Column(String(30))
+    suggested_followup = Column(String(500))
+    remark = Column(Text)
+    is_active = Column(Boolean, default=True)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 

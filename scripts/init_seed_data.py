@@ -3,8 +3,9 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from datetime import datetime, timedelta
 from app.database import SessionLocal, engine, Base
-from app.models import Channel, Store, Blacklist, DedupRule
+from app.models import Channel, Store, Blacklist, DedupRule, CustomerArchive
 from app.services.deduplication import hash_phone
 
 
@@ -79,8 +80,9 @@ def init_seed_data():
         
         dedup_rules = [
             {
-                "rule_name": "标准判重规则",
+                "rule_name": "标准判重规则 V1",
                 "rule_key": "standard",
+                "version": 1,
                 "phone_weight": 60.0,
                 "wechat_weight": 50.0,
                 "name_weight": 10.0,
@@ -88,11 +90,15 @@ def init_seed_data():
                 "confirmed_threshold": 80.0,
                 "suspected_threshold": 40.0,
                 "description": "默认标准判重策略，手机号权重最高",
-                "is_active": True
+                "status": "published",
+                "is_active": True,
+                "published_by": "init",
+                "published_at": datetime.now()
             },
             {
-                "rule_name": "宽松判重规则",
+                "rule_name": "宽松判重规则 V1",
                 "rule_key": "loose",
+                "version": 1,
                 "phone_weight": 40.0,
                 "wechat_weight": 30.0,
                 "name_weight": 15.0,
@@ -100,11 +106,13 @@ def init_seed_data():
                 "confirmed_threshold": 70.0,
                 "suspected_threshold": 30.0,
                 "description": "宽松策略，更容易触发疑似重复，适合试运营期",
+                "status": "draft",
                 "is_active": False
             },
             {
-                "rule_name": "严格判重规则",
+                "rule_name": "严格判重规则 V1",
                 "rule_key": "strict",
+                "version": 1,
                 "phone_weight": 70.0,
                 "wechat_weight": 60.0,
                 "name_weight": 5.0,
@@ -112,18 +120,66 @@ def init_seed_data():
                 "confirmed_threshold": 90.0,
                 "suspected_threshold": 50.0,
                 "description": "严格策略，只拦截高置信度重复，减少误判",
+                "status": "draft",
                 "is_active": False
             },
         ]
         
         for rule_data in dedup_rules:
-            existing = db.query(DedupRule).filter(DedupRule.rule_key == rule_data["rule_key"]).first()
+            existing = db.query(DedupRule).filter(
+                DedupRule.rule_key == rule_data["rule_key"],
+                DedupRule.version == rule_data["version"]
+            ).first()
             if not existing:
                 rule = DedupRule(**rule_data)
                 db.add(rule)
-                print(f"  新增判重规则: {rule_data['rule_key']} - {rule_data['rule_name']}")
+                print(f"  新增判重规则: {rule_data['rule_key']} V{rule_data['version']} - {rule_data['rule_name']} [{rule_data['status']}]")
             else:
-                print(f"  判重规则已存在: {rule_data['rule_key']}")
+                print(f"  判重规则已存在: {rule_data['rule_key']} V{rule_data['version']}")
+        
+        sample_customers = [
+            {
+                "phone": "13800009999",
+                "name": "王美丽",
+                "city": "北京",
+                "original_source_channel": "OFFICIAL_WEBSITE",
+                "original_source_store": "BJ_CHAOYANG",
+                "first_visit_date": datetime.now() - timedelta(days=365),
+                "last_visit_date": datetime.now() - timedelta(days=30),
+                "total_visit_count": 5,
+                "customer_level": "VIP",
+                "suggested_followup": "高意向VIP客户，由原跟进人李医生继续回访，本月有复购双眼皮活动可推荐",
+                "remark": "2024年埋线双眼皮，反馈良好，咨询过祛斑项目"
+            },
+            {
+                "phone": "13800008888",
+                "name": "李芳芳",
+                "city": "上海",
+                "original_source_channel": "CRM_IMPORT",
+                "original_source_store": "SH_PUDONG",
+                "first_visit_date": datetime.now() - timedelta(days=540),
+                "last_visit_date": datetime.now() - timedelta(days=90),
+                "total_visit_count": 2,
+                "customer_level": "普通",
+                "suggested_followup": "老客唤醒，上次做了水光针，可推季度保养套餐",
+                "remark": "2023年水光针2次"
+            },
+        ]
+        
+        for cust in sample_customers:
+            ph = cust.pop("phone")
+            phone_hash = hash_phone(ph)
+            existing = db.query(CustomerArchive).filter(CustomerArchive.phone_hash == phone_hash).first()
+            if not existing:
+                archive = CustomerArchive(
+                    phone=ph,
+                    phone_hash=phone_hash,
+                    **cust
+                )
+                db.add(archive)
+                print(f"  预置客户档案: {ph} - {cust.get('name')} [{cust.get('customer_level')}]")
+            else:
+                print(f"  客户档案已存在: {ph}")
         
         db.commit()
         print("\n种子数据初始化完成！")

@@ -4,7 +4,7 @@ from typing import Optional
 
 from app.database import get_db
 from app.schemas import ApiResponse
-from app.services.stats import get_channel_stats, get_store_stats, get_daily_trend
+from app.services.stats import get_channel_stats, get_store_stats, get_daily_trend, get_review_stats
 from app.models import ApiLog
 
 router = APIRouter(prefix="/stats", tags=["统计查询"])
@@ -73,6 +73,7 @@ async def get_overview_stats(
     db: Session = Depends(get_db)
 ):
     channel_stats = get_channel_stats(db, start_date, end_date)
+    review_stats = get_review_stats(db, start_date, end_date)
     
     total_leads = sum(s["total_leads"] for s in channel_stats)
     total_valid = sum(s["valid_leads"] for s in channel_stats)
@@ -95,7 +96,13 @@ async def get_overview_stats(
             "duplicate_rate": round(total_dup / total_leads * 100, 2) if total_leads > 0 else 0.0,
             "new_customer_rate": round(total_new / total_leads * 100, 2) if total_leads > 0 else 0.0,
             "returning_rate": round(total_returning / total_leads * 100, 2) if total_leads > 0 else 0.0,
-            "channel_count": len(channel_stats)
+            "channel_count": len(channel_stats),
+            "review_summary": {
+                "total_pending": review_stats["total_pending"],
+                "total_reviewed": review_stats["total_reviewed"],
+                "review_rate": review_stats["review_rate"],
+                "by_confirm_result": review_stats["by_confirm_result"]
+            }
         }
     )
 
@@ -160,4 +167,19 @@ async def get_api_logs(
             "page": page,
             "page_size": page_size
         }
+    )
+
+
+@router.get("/reviews", response_model=ApiResponse, summary="复核统计：按结果/最终归属渠道/门店分组查看")
+async def get_review_statistics(
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    review_data = get_review_stats(db, start_date, end_date)
+    
+    return ApiResponse(
+        code=0,
+        message="success",
+        data=review_data
     )

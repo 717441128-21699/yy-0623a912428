@@ -66,6 +66,83 @@ def update_daily_stats(db: Session, channel_code: str, store_code: Optional[str]
     db.flush()
 
 
+def get_review_stats(db: Session, start_date: Optional[str] = None,
+                     end_date: Optional[str] = None) -> Dict:
+    query = db.query(LeadDuplicate)
+    
+    if start_date:
+        query = query.filter(LeadDuplicate.confirmed_at >= start_date)
+    if end_date:
+        query = query.filter(LeadDuplicate.confirmed_at <= f"{end_date} 23:59:59")
+    
+    total_pending = db.query(LeadDuplicate).filter(LeadDuplicate.is_confirmed == False).count()
+    total_reviewed = db.query(LeadDuplicate).filter(LeadDuplicate.is_confirmed == True).count()
+    
+    by_result_rows = db.query(
+        LeadDuplicate.confirm_result, func.count(LeadDuplicate.id)
+    ).filter(
+        LeadDuplicate.is_confirmed == True
+    ).group_by(LeadDuplicate.confirm_result).all()
+    
+    by_result = {}
+    for r in by_result_rows:
+        by_result[r[0]] = r[1]
+    
+    by_channel_rows = db.query(
+        LeadDuplicate.final_owner_channel, func.count(LeadDuplicate.id)
+    ).filter(
+        LeadDuplicate.is_confirmed == True,
+        LeadDuplicate.final_owner_channel.isnot(None)
+    ).group_by(LeadDuplicate.final_owner_channel).all()
+    
+    channel_map = {c.channel_code: c.channel_name for c in db.query(Channel).all()}
+    
+    by_channel = []
+    for r in by_channel_rows:
+        by_channel.append({
+            "final_owner_channel": r[0],
+            "channel_name": channel_map.get(r[0], r[0]),
+            "count": r[1]
+        })
+    
+    by_store_rows = db.query(
+        LeadDuplicate.final_owner_store, func.count(LeadDuplicate.id)
+    ).filter(
+        LeadDuplicate.is_confirmed == True,
+        LeadDuplicate.final_owner_store.isnot(None)
+    ).group_by(LeadDuplicate.final_owner_store).all()
+    
+    store_map = {s.store_code: {"name": s.store_name, "city": s.city} for s in db.query(Store).all()}
+    
+    by_store = []
+    for r in by_store_rows:
+        si = store_map.get(r[0], {"name": r[0], "city": None})
+        by_store.append({
+            "final_owner_store": r[0],
+            "store_name": si["name"],
+            "city": si["city"],
+            "count": r[1]
+        })
+    
+    lead_by_status_rows = db.query(
+        Lead.review_status, func.count(Lead.id)
+    ).group_by(Lead.review_status).all()
+    
+    by_lead_status = {}
+    for r in lead_by_status_rows:
+        by_lead_status[r[0] or "pending"] = r[1]
+    
+    return {
+        "total_pending": total_pending,
+        "total_reviewed": total_reviewed,
+        "review_rate": round(total_reviewed / max(total_pending + total_reviewed, 1) * 100, 2),
+        "by_confirm_result": by_result,
+        "by_final_owner_channel": by_channel,
+        "by_final_owner_store": by_store,
+        "by_lead_review_status": by_lead_status
+    }
+
+
 def get_channel_stats(db: Session, start_date: Optional[str] = None, 
                        end_date: Optional[str] = None) -> List[Dict]:
     query = db.query(
