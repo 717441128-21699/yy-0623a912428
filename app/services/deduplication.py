@@ -1,0 +1,311 @@
+import hashlib
+import uuid
+from datetime import datetime
+from typing import Optional, Tuple, List
+from sqlalchemy.orm import Session
+from app.models import Lead, LeadDuplicate, Blacklist, Channel, Store
+from app.config import settings
+from app.schemas import LeadReceiveRequest
+
+
+class DeduplicationResult:
+    def __init__(self):
+        self.result_type = "new_customer"
+        self.result_description = "新客"
+        self.suggested_action = "分配给对应门店跟进"
+        self.match_score = 0.0
+        self.duplicate_reason_code = None
+        self.duplicate_reason = None
+        self.is_new_customer = True
+        self.is_blacklist = False
+        self.is_cross_store = False
+        self.attribution_channel = None
+        self.attribution_store = None
+        self.attribution_type = "first_touch"
+        self.original_lead_id = None
+        self.original_channel = None
+        self.original_store = None
+        self.original_lead_time = None
+        self.conflict_duplicate_id = None
+
+
+def hash_phone(phone: str) -> str:
+    if not phone:
+        return ""
+    salted = f"{settings.LEAD_PHONE_HASH_SALT}:{phone}"
+    return hashlib.sha256(salted.encode('utf-8')).hexdigest()
+
+
+def generate_lead_id() -> str:
+    return f"LEAD{datetime.now().strftime('%Y%m%d%H%M%S')}{uuid.uuid4().hex[:8].upper()}"
+
+
+def generate_request_id() -> str:
+    return f"REQ{datetime.now().strftime('%Y%m%d%H%M%S')}{uuid.uuid4().hex[:10].upper()}"
+
+
+def check_blacklist(db: Session, phone: Optional[str], wechat_encrypted: Optional[str]) -> Tuple[bool, Optional[str]]:
+    if phone:
+        phone_hash = hash_phone(phone)
+        black = db.query(Blacklist).filter(
+            Blacklist.black_type == "phone",
+            Blacklist.black_value == phone_hash,
+            Blacklist.is_active == True
+        ).first()
+        if black:
+            return True, black.reason or "手机号在黑名单中"
+    
+    if wechat_encrypted:
+        black = db.query(Blacklist).filter(
+            Blacklist.black_type == "wechat",
+            Blacklist.black_value == wechat_encrypted,
+            Blacklist.is_active == True
+        ).first()
+        if black:
+            return True, black.reason or "微信在黑名单中"
+    
+    return False, None
+
+
+def find_matching_leads(db: Session, phone: Optional[str], wechat_encrypted: Optional[str]) -> List[Lead]:
+    matches = []
+    
+    if phone:
+        phone_hash = hash_phone(phone)
+        phone_matches = db.query(Lead).filter(
+            Lead.phone_hash == phone_hash
+        ).all()
+        matches.extend(phone_matches)
+    
+    if wechat_encrypted:
+        wechat_matches = db.query(Lead).filter(
+            Lead.wechat_encrypted == wechat_encrypted
+        ).all()
+        for m in wechat_matches:
+            if m not in matches:
+                matches.append(m)
+    
+    return matches
+
+
+def calculate_match_score(lead: Lead, request: LeadReceiveRequest) -> float:
+    score = 0.0
+    
+    if request.phone and lead.phone_hash == hash_phone(request.phone):
+        score += 60.0
+    
+    if request.wechat_encrypted and lead.wechat_encrypted == request.wechat_encrypted:
+        score += 50.0
+    
+    if request.name and lead.name and request.name == lead.name:
+        score += 10.0
+    
+    if request.city and lead.city and request.city == lead.city:
+        score += 5.0
+    
+    return min(score, 100.0)
+
+
+def get_channel_priority(db: Session, channel_code: str) -> int:
+    channel = db.query(Channel).filter(Channel.channel_code == channel_code).first()
+    if channel:
+        return channel.priority
+    return settings.DEFAULT_CHANNEL_PRIORITY
+
+
+def determine_attribution(db: Session, original_lead: Lead, new_channel: str, new_store: Optional[str]) -> Tuple[str, str, Optional[str], str]:
+    first_channel = original_lead.first_channel_code or original_lead.channel_code
+    first_store = original_lead.first_store_code or original_lead.store_code
+    
+    last_channel = original_lead.last_channel_code or original_lead.channel_code
+    last_store = original_lead.last_store_code or original_lead.store_code
+    
+    first_priority = get_channel_priority(db, first_channel)
+    new_priority = get_channel_priority(db, new_channel)
+    
+    attribution_type = "first_touch"
+    attribution_channel = first_channel
+    attribution_store = first_store
+    
+    if new_priority > first_priority:
+        attribution_type = "priority_channel"
+        attribution_channel = new_channel
+        attribution_store = new_store
+    elif original_lead.attribution_type == "last_touch":
+        attribution_type = "last_touch"
+        attribution_channel = last_channel
+        attribution_store = last_store
+    
+    return attribution_type, attribution_channel, attribution_store, first_channel
+
+
+def check_cross_store(original_store: Optional[str], new_store: Optional[str]) -> bool:
+    if not original_store or not new_store:
+        return False
+    return original_store != new_store
+
+
+def deduplicate_lead(db: Session, request: LeadReceiveRequest) -> Tuple[DeduplicationResult, Optional[Lead]]:
+    result = DeduplicationResult()
+    
+    is_black, black_reason = check_blacklist(db, request.phone, request.wechat_encrypted)
+    if is_black:
+        result.result_type = "blacklist"
+        result.result_description = "黑名单线索"
+        result.suggested_action = "直接拦截，不进入分配流程"
+        result.is_blacklist = True
+        result.is_new_customer = False
+        result.duplicate_reason_code = "BLACKLIST"
+        result.duplicate_reason = black_reason
+        result.match_score = 100.0
+        return result, None
+    
+    matching_leads = find_matching_leads(db, request.phone, request.wechat_encrypted)
+    
+    if not matching_leads:
+        result.attribution_channel = request.channel_code
+        result.attribution_store = request.store_code
+        result.attribution_type = "first_touch"
+        return result, None
+    
+    best_match = None
+    best_score = 0.0
+    
+    for lead in matching_leads:
+        score = calculate_match_score(lead, request)
+        if score > best_score:
+            best_score = score
+            best_match = lead
+    
+    result.match_score = best_score
+    result.is_new_customer = False
+    result.original_lead_id = best_match.lead_id
+    result.original_channel = best_match.channel_code
+    result.original_store = best_match.store_code
+    result.original_lead_time = best_match.created_at
+    
+    attribution_type, attr_channel, attr_store, first_channel = determine_attribution(
+        db, best_match, request.channel_code, request.store_code
+    )
+    result.attribution_type = attribution_type
+    result.attribution_channel = attr_channel
+    result.attribution_store = attr_store
+    
+    is_cross = check_cross_store(best_match.store_code, request.store_code)
+    result.is_cross_store = is_cross
+    
+    if best_match.lead_status == "allocated":
+        result.result_type = "allocated"
+        result.result_description = "已分配线索"
+        result.suggested_action = "已有跟进人，转交原跟进人或协同处理"
+        result.duplicate_reason_code = "ALLOCATED"
+        result.duplicate_reason = "该线索已分配给其他人员跟进"
+    elif is_cross:
+        result.result_type = "cross_store_conflict"
+        result.result_description = "跨门店重复"
+        result.suggested_action = "触发跨店冲突流程，由总部或区域协调归属"
+        result.duplicate_reason_code = "CROSS_STORE"
+        result.duplicate_reason = f"原归属门店[{best_match.store_code}]与新门店[{request.store_code}]冲突"
+    elif best_score >= 80:
+        result.result_type = "confirmed_duplicate"
+        result.result_description = "确认重复"
+        result.suggested_action = "合并到原有线索，更新末触信息"
+        result.duplicate_reason_code = "CONFIRMED_DUP"
+        result.duplicate_reason = "手机号或微信高度匹配"
+    elif best_score >= 40:
+        result.result_type = "suspected_duplicate"
+        result.result_description = "疑似重复"
+        result.suggested_action = "人工复核确认后再处理"
+        result.duplicate_reason_code = "SUSPECTED_DUP"
+        result.duplicate_reason = "部分信息匹配，需人工确认"
+    else:
+        result.result_type = "returning_customer"
+        result.result_description = "老客复询"
+        result.suggested_action = "关联原有客户档案，继续跟进"
+        result.duplicate_reason_code = "RETURNING"
+        result.duplicate_reason = "老客户再次咨询"
+    
+    return result, best_match
+
+
+def create_lead_record(db: Session, request: LeadReceiveRequest, result: DeduplicationResult) -> Lead:
+    lead_id = generate_lead_id()
+    phone_hash = hash_phone(request.phone) if request.phone else None
+    
+    now = datetime.now()
+    
+    lead = Lead(
+        lead_id=lead_id,
+        phone=request.phone,
+        phone_hash=phone_hash,
+        wechat_encrypted=request.wechat_encrypted,
+        name=request.name,
+        city=request.city,
+        intended_project=request.intended_project,
+        ad_plan=request.ad_plan,
+        landing_page=request.landing_page,
+        channel_code=request.channel_code,
+        store_code=request.store_code,
+        lead_status="new" if result.is_new_customer else "duplicate",
+        attribution_type=result.attribution_type,
+        first_channel_code=result.attribution_channel or request.channel_code,
+        first_store_code=result.attribution_store or request.store_code,
+        first_lead_time=now,
+        last_channel_code=request.channel_code,
+        last_store_code=request.store_code,
+        last_lead_time=now,
+        total_lead_count=1,
+        is_cross_store=result.is_cross_store,
+        remark=request.remark
+    )
+    
+    db.add(lead)
+    db.flush()
+    return lead
+
+
+def update_existing_lead(db: Session, existing_lead: Lead, request: LeadReceiveRequest, result: DeduplicationResult) -> Lead:
+    existing_lead.total_lead_count += 1
+    existing_lead.last_channel_code = request.channel_code
+    existing_lead.last_store_code = request.store_code
+    existing_lead.last_lead_time = datetime.now()
+    
+    if result.is_cross_store:
+        existing_lead.is_cross_store = True
+    
+    if request.intended_project and not existing_lead.intended_project:
+        existing_lead.intended_project = request.intended_project
+    
+    if request.city and not existing_lead.city:
+        existing_lead.city = request.city
+    
+    if request.name and not existing_lead.name:
+        existing_lead.name = request.name
+    
+    db.flush()
+    return existing_lead
+
+
+def create_duplicate_record(db: Session, original_lead: Lead, new_lead_id: str, 
+                             result: DeduplicationResult, request: LeadReceiveRequest) -> LeadDuplicate:
+    dup = LeadDuplicate(
+        lead_id=original_lead.lead_id,
+        duplicate_lead_id=new_lead_id,
+        duplicate_type=result.result_type,
+        duplicate_reason=result.duplicate_reason,
+        duplicate_reason_code=result.duplicate_reason_code,
+        match_score=result.match_score,
+        is_confirmed=False,
+        is_cross_store=result.is_cross_store,
+        original_store=original_lead.store_code,
+        duplicate_store=request.store_code,
+        channel_conflict=(original_lead.channel_code != request.channel_code),
+        original_channel=original_lead.channel_code,
+        duplicate_channel=request.channel_code
+    )
+    
+    db.add(dup)
+    db.flush()
+    
+    result.conflict_duplicate_id = dup.id
+    return dup
